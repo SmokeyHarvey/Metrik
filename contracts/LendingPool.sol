@@ -15,6 +15,20 @@ import "./Staking.sol";
 contract LendingPool is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
 
+    // Custom Errors
+    error NoStakedTokensFound();
+    error InsufficientBalance();
+    error InsufficientLiquidity();
+    error InvalidAmount();
+    error InvalidBorrowAmount();
+    error InvoiceExpired();
+    error LoanAlreadyExists();
+    error InvoiceNotVerified();
+    error NotInvoiceSupplier();
+    error LoanAlreadySettled();
+    error LoanNotOverdue();
+    error NotLoanOwner();
+
     // Constants
     uint256 public constant BORROW_CAP_PERCENTAGE = 60; // 60% of invoice amount
     uint256 public constant BASIS_POINTS = 10000;
@@ -94,15 +108,19 @@ contract LendingPool is ReentrancyGuard, Ownable {
         uint256 tokenId,
         uint256 borrowAmount
     ) external nonReentrant {
-        require(borrowAmount > 0, "Borrow amount must be greater than 0");
-        require(borrowAmount <= getMaxBorrowAmount(tokenId), "Borrow amount exceeds limit");
+        if (borrowAmount == 0) revert InvalidAmount();
+        if (borrowAmount > getMaxBorrowAmount(tokenId)) revert InvalidBorrowAmount();
+
+        // Check if supplier has staked tokens first
+        (uint256 stakedAmount,,,,) = staking.getStakeInfo(msg.sender);
+        if (stakedAmount == 0) revert NoStakedTokensFound();
 
         // Get invoice details
         InvoiceNFT.InvoiceDetails memory invoice = invoiceNFT.getInvoiceDetails(tokenId);
-        require(invoice.supplier == msg.sender, "Not invoice supplier");
-        require(invoice.dueDate > block.timestamp, "Invoice expired");
-        require(!userActiveLoans[msg.sender][tokenId], "Loan already exists for this invoice");
-        require(invoice.isVerified, "Invoice not verified");
+        if (invoice.supplier != msg.sender) revert NotInvoiceSupplier();
+        if (invoice.dueDate <= block.timestamp) revert InvoiceExpired();
+        if (userActiveLoans[msg.sender][tokenId]) revert LoanAlreadyExists();
+        if (!invoice.isVerified) revert InvoiceNotVerified();
 
         // Transfer invoice NFT to lending pool
         invoiceNFT.transferFrom(msg.sender, address(this), tokenId);
@@ -140,11 +158,14 @@ contract LendingPool is ReentrancyGuard, Ownable {
     function deposit(uint256 amount) external nonReentrant {
         require(amount > 0, "Amount must be greater than 0");
         
-        // Update existing interest
-        _updateLPInterest(msg.sender);
+        // Update existing interest if there's a previous deposit
+        if (lpInfo[msg.sender].depositAmount > 0) {
+            _updateLPInterest(msg.sender);
+        }
         
         stablecoin.safeTransferFrom(msg.sender, address(this), amount);
         lpInfo[msg.sender].depositAmount += amount;
+        lpInfo[msg.sender].lastInterestUpdate = block.timestamp; // Initialize to current time
         totalDeposits += amount;
 
         emit Deposit(msg.sender, amount);
@@ -155,15 +176,21 @@ contract LendingPool is ReentrancyGuard, Ownable {
      * @param amount Amount to withdraw
      */
     function withdraw(uint256 amount) external nonReentrant {
-        require(amount > 0, "Amount must be greater than 0");
-        require(lpInfo[msg.sender].depositAmount >= amount, "Insufficient balance");
-        require(totalDeposits - totalBorrowed >= amount, "Insufficient liquidity");
-
-        // Update interest
+        if (amount == 0) revert InvalidAmount();
+        if (lpInfo[msg.sender].depositAmount < amount) revert InsufficientBalance();
+        
+        // Update interest before checking liquidity
         _updateLPInterest(msg.sender);
         
+        // Check if there's enough liquidity after updating interest
+        uint256 availableLiquidity = totalDeposits - totalBorrowed;
+        if (availableLiquidity < amount) revert InsufficientLiquidity();
+        
+        // Update state before transfer
         lpInfo[msg.sender].depositAmount -= amount;
         totalDeposits -= amount;
+        
+        // Transfer after state updates
         stablecoin.safeTransfer(msg.sender, amount);
 
         emit Withdraw(msg.sender, amount);
@@ -193,14 +220,17 @@ contract LendingPool is ReentrancyGuard, Ownable {
         require(block.timestamp <= loan.dueDate, "Loan overdue");
         require(loan.supplier == msg.sender, "Not loan owner");
 
-        // Calculate interest
+        // Update interest accrued
         uint256 interest = _calculateInterest(loan.amount, loan.lastInterestUpdate, BORROWER_INTEREST_RATE);
-        uint256 totalAmount = loan.amount + interest;
+        loan.interestAccrued += interest;
+        loan.lastInterestUpdate = block.timestamp;
+
+        uint256 totalAmount = loan.amount + loan.interestAccrued;
 
         stablecoin.safeTransferFrom(msg.sender, address(this), totalAmount);
         
         // Update platform fees
-        uint256 platformFee = (interest * PLATFORM_FEE) / BORROWER_INTEREST_RATE;
+        uint256 platformFee = (loan.interestAccrued * PLATFORM_FEE) / BORROWER_INTEREST_RATE;
         platformFees += platformFee;
         
         // Update loan status
@@ -221,19 +251,22 @@ contract LendingPool is ReentrancyGuard, Ownable {
      * @param invoiceId ID of the invoice NFT
      * @param supplierId Supplier's unique identifier
      */
-    function liquidateOverdue(uint256 invoiceId, string calldata supplierId) external nonReentrant {
+    function liquidate(uint256 invoiceId, string calldata supplierId) external nonReentrant {
         Loan storage loan = loans[invoiceId];
         require(!loan.isRepaid && !loan.isLiquidated, "Loan already settled");
         require(block.timestamp > loan.dueDate, "Loan not overdue");
 
-        // Calculate interest and penalty
+        // Update interest accrued
         uint256 interest = _calculateInterest(loan.amount, loan.lastInterestUpdate, BORROWER_INTEREST_RATE);
-        uint256 totalAmount = loan.amount + interest;
+        loan.interestAccrued += interest;
+        loan.lastInterestUpdate = block.timestamp;
+
+        uint256 totalAmount = loan.amount + loan.interestAccrued;
 
         stablecoin.safeTransferFrom(msg.sender, address(this), totalAmount);
         
         // Update platform fees
-        uint256 platformFee = (interest * PLATFORM_FEE) / BORROWER_INTEREST_RATE;
+        uint256 platformFee = (loan.interestAccrued * PLATFORM_FEE) / BORROWER_INTEREST_RATE;
         platformFees += platformFee;
         
         // Update loan status
@@ -263,14 +296,16 @@ contract LendingPool is ReentrancyGuard, Ownable {
     function _updateLPInterest(address lp) internal {
         LPInfo storage info = lpInfo[lp];
         if (info.depositAmount > 0) {
-            uint256 interest = _calculateInterest(
+            // Calculate new interest since last update
+            uint256 newInterest = _calculateInterest(
                 info.depositAmount,
                 info.lastInterestUpdate,
                 LP_INTEREST_RATE
             );
-            info.interestAccrued += interest;
+            // Add only the new interest
+            info.interestAccrued += newInterest;
+            info.lastInterestUpdate = block.timestamp;
         }
-        info.lastInterestUpdate = block.timestamp;
     }
 
     /**
@@ -286,7 +321,10 @@ contract LendingPool is ReentrancyGuard, Ownable {
         uint256 rate
     ) internal view returns (uint256) {
         uint256 timeElapsed = block.timestamp - startTime;
-        return (principal * rate * timeElapsed) / (365 days * BASIS_POINTS);
+        // Convert timeElapsed to years (with 18 decimals for precision)
+        uint256 timeInYears = (timeElapsed * 1e18) / (365 days);
+        // Calculate interest: principal * rate * timeInYears / BASIS_POINTS
+        return (principal * rate * timeInYears) / (BASIS_POINTS * 1e18);
     }
 
     /**
@@ -298,11 +336,14 @@ contract LendingPool is ReentrancyGuard, Ownable {
         LPInfo storage info = lpInfo[lp];
         if (info.depositAmount == 0) return info.interestAccrued;
         
-        return info.interestAccrued + _calculateInterest(
+        // Calculate current interest including accrued and new interest
+        uint256 currentInterest = info.interestAccrued + _calculateInterest(
             info.depositAmount,
             info.lastInterestUpdate,
             LP_INTEREST_RATE
         );
+        
+        return currentInterest;
     }
 
     /**
@@ -353,12 +394,23 @@ contract LendingPool is ReentrancyGuard, Ownable {
     ) {
         require(userActiveLoans[user][tokenId], "Loan not found or not active");
         Loan storage loan = loans[tokenId];
+        
+        // Calculate current interest
+        uint256 currentInterest = loan.interestAccrued;
+        if (!loan.isRepaid && !loan.isLiquidated) {
+            currentInterest += _calculateInterest(
+                loan.amount,
+                loan.lastInterestUpdate,
+                BORROWER_INTEREST_RATE
+            );
+        }
+        
         return (
             loan.amount,
             loan.dueDate,
             loan.isRepaid,
             loan.isLiquidated,
-            loan.interestAccrued
+            currentInterest
         );
     }
 

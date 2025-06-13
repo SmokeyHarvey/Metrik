@@ -13,6 +13,12 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 contract Staking is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
 
+    // Custom Errors
+    error StakingPeriodNotEnded();
+    error NoStakeFound();
+    error InvalidAmount();
+    error InvalidDuration();
+
     // Constants
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant POINTS_PER_TOKEN = 1;
@@ -51,9 +57,9 @@ contract Staking is ReentrancyGuard, Ownable {
      * @param duration Staking duration in seconds
      */
     function stake(uint256 amount, uint256 duration) external nonReentrant {
-        require(amount > 0, "Amount must be greater than 0");
-        require(duration >= 30 days, "Minimum duration is 30 days");
-        require(duration <= 365 days, "Maximum duration is 365 days");
+        if (amount == 0) revert InvalidAmount();
+        if (duration < 3 minutes) revert InvalidDuration();
+        if (duration > 365 days) revert InvalidDuration();
 
         // Update existing stake if any
         if (stakes[msg.sender].amount > 0) {
@@ -92,8 +98,8 @@ contract Staking is ReentrancyGuard, Ownable {
      */
     function unstake() external nonReentrant {
         StakeInfo storage stakeInfo = stakes[msg.sender];
-        require(stakeInfo.amount > 0, "No stake found");
-        require(block.timestamp >= stakeInfo.startTime + stakeInfo.duration, "Staking period not ended");
+        if (stakeInfo.amount == 0) revert NoStakeFound();
+        if (block.timestamp < stakeInfo.startTime + stakeInfo.duration) revert StakingPeriodNotEnded();
 
         _updatePoints(msg.sender);
 

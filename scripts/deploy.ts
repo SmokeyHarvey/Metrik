@@ -45,64 +45,49 @@ async function main() {
   await lendingPool.waitForDeployment();
   console.log("LendingPool deployed to:", await lendingPool.getAddress());
 
-  // Grant LendingPool the verifier role in InvoiceNFT
-  const invoiceNFTContract = await ethers.getContractAt("InvoiceNFT", await invoiceNFT.getAddress());
-  await invoiceNFTContract.grantRole(await invoiceNFTContract.VERIFIER_ROLE(), await lendingPool.getAddress());
-  console.log("Granted LendingPool verifier role in InvoiceNFT");
+  // Helper function to grant role with retry
+  async function grantRoleWithRetry(contract: any, role: string, account: string, maxRetries = 3) {
+    let retries = 0;
+    while (retries < maxRetries) {
+      try {
+        const tx = await contract.grantRole(role, account);
+        await tx.wait();
+        console.log(`Granted ${role} to ${account}`);
+        return;
+      } catch (error: any) {
+        if (error.message.includes("replacement transaction underpriced")) {
+          console.log(`Retry ${retries + 1}/${maxRetries}: Waiting for previous transaction...`);
+          await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+          retries++;
+        } else {
+          throw error;
+        }
+      }
+    }
+    throw new Error(`Failed to grant role after ${maxRetries} retries`);
+  }
 
-  // Grant MINTER_ROLE to supplier
-  const supplierAddress = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"; // Hardhat's second account
-  await invoiceNFTContract.grantRole(await invoiceNFTContract.MINTER_ROLE(), supplierAddress);
-  console.log("Granted MINTER_ROLE to supplier");
+  // Grant roles with retry mechanism
+  const VERIFIER_ROLE = await invoiceNFT.VERIFIER_ROLE();
+  const MINTER_ROLE = await invoiceNFT.MINTER_ROLE();
 
-  // Mint METRIK tokens to owner
-  const mintMetrikTx = await metrikToken.mint(deployer.address, ethers.parseEther("1000000"));
-  await mintMetrikTx.wait();
-  console.log("Minted 1,000,000 METRIK tokens to owner");
+  await grantRoleWithRetry(invoiceNFT, VERIFIER_ROLE, await lendingPool.getAddress());
+  await grantRoleWithRetry(invoiceNFT, MINTER_ROLE, deployer.address);
 
-  // Mint USDC tokens to owner
-  const mintUSDCTx = await usdc.mint(deployer.address, ethers.parseUnits("1000000", 6));
-  await mintUSDCTx.wait();
-  console.log("Minted 1,000,000 USDC to owner");
-
-  // Mint USDC tokens to LP
-  const lpAddress = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"; // Hardhat's third account
-  const mintUSDCToLPTx = await usdc.mint(lpAddress, ethers.parseUnits("1000000", 6));
-  await mintUSDCToLPTx.wait();
-  console.log("Minted 1,000,000 USDC to LP");
-
-  // Approve METRIK tokens for staking
-  const approveMetrikTx = await metrikToken.approve(await staking.getAddress(), ethers.parseEther("1000000"));
-  await approveMetrikTx.wait();
-  console.log("Approved 1,000,000 METRIK tokens for staking");
-
-  // Approve USDC tokens for lending pool
-  const approveUSDCTx = await usdc.approve(await lendingPool.getAddress(), ethers.parseUnits("1000000", 6));
-  await approveUSDCTx.wait();
-  console.log("Approved 1,000,000 USDC tokens for lending pool");
-
-  // Save deployed addresses
-  const deployedAddresses = {
+  // Save deployment addresses
+  const network = process.env.HARDHAT_NETWORK || "hardhat";
+  const deploymentPath = path.join(__dirname, "..", "deployments", `${network}.json`);
+  
+  const deployment = {
     metrikToken: await metrikToken.getAddress(),
     usdc: await usdc.getAddress(),
     invoiceNFT: await invoiceNFT.getAddress(),
     staking: await staking.getAddress(),
-    lendingPool: await lendingPool.getAddress(),
-    network: (await ethers.provider.getNetwork()).name,
-    deployer: deployer.address
+    lendingPool: await lendingPool.getAddress()
   };
 
-  // Create deployments directory if it doesn't exist
-  const deploymentsDir = path.join(__dirname, "../deployments");
-  if (!fs.existsSync(deploymentsDir)) {
-    fs.mkdirSync(deploymentsDir);
-  }
-
-  // Save addresses to a JSON file
-  const networkName = (await ethers.provider.getNetwork()).name;
-  const filePath = path.join(deploymentsDir, `${networkName}.json`);
-  fs.writeFileSync(filePath, JSON.stringify(deployedAddresses, null, 2));
-  console.log(`Deployed addresses saved to ${filePath}`);
+  fs.writeFileSync(deploymentPath, JSON.stringify(deployment, null, 2));
+  console.log("Deployment addresses saved to:", deploymentPath);
 }
 
 main()

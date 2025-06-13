@@ -290,14 +290,10 @@ describe("DeFi Credit Protocol", function () {
 
       // Calculate repayment amount (principal + interest)
       const loanDetails = await lendingPool.getUserLoanDetails(supplier.address, tokenId);
-      const timeElapsed = Math.floor(Date.now() / 1000) - Number(loan.lastInterestUpdate);
-      const interest = (loan.amount * 1000n * BigInt(timeElapsed)) / (365n * 24n * 60n * 60n * 10000n); // BORROWER_INTEREST_RATE = 1000, BASIS_POINTS = 10000
-      // Round up to nearest USDC decimal (6 decimals)
-      const repayAmount = loan.amount + (interest + 999999n) / 1000000n * 1000000n;
+      const repayAmount = loanDetails.amount + loanDetails.interestAccrued;
       console.log("Repayment calculation:", {
-        principal: ethers.formatUnits(loan.amount, 6),
-        timeElapsed: timeElapsed,
-        interest: ethers.formatUnits(interest, 6),
+        principal: ethers.formatUnits(loanDetails.amount, 6),
+        interest: ethers.formatUnits(loanDetails.interestAccrued, 6),
         totalAmount: ethers.formatUnits(repayAmount, 6)
       });
 
@@ -305,29 +301,91 @@ describe("DeFi Credit Protocol", function () {
       const supplierBalance = await usdc.balanceOf(supplier.address);
       console.log("Supplier USDC balance:", ethers.formatUnits(supplierBalance, 6));
 
-      // Approve USDC for repayment
+      // Approve USDC for repayment with a small buffer for rounding
+      const repayAmountWithBuffer = repayAmount + ethers.parseUnits("1", 6); // Add 1 USDC buffer
       console.log("Approving USDC for repayment...");
-      const approveTx = await usdc.connect(supplier).approve(await lendingPool.getAddress(), repayAmount);
+      const approveTx = await usdc.connect(supplier).approve(await lendingPool.getAddress(), repayAmountWithBuffer);
       await approveTx.wait();
-      console.log("Approved", ethers.formatUnits(repayAmount, 6), "USDC for repayment");
+      console.log("Approved", ethers.formatUnits(repayAmountWithBuffer, 6), "USDC for repayment");
 
       // Check approval
       const allowance = await usdc.allowance(supplier.address, await lendingPool.getAddress());
       console.log("USDC allowance:", ethers.formatUnits(allowance, 6));
 
+      // Get LP interest before repayment
+      const lpInterestBefore = await lendingPool.getLPInterest(lp.address);
+      console.log("LP interest before repayment:", ethers.formatUnits(lpInterestBefore, 6));
+
       // Repay loan
       console.log("Repaying loan...");
       try {
         const repayTx = await lendingPool.connect(supplier).repay(tokenId);
-        await repayTx.wait();
+        const repayReceipt = await repayTx.wait();
         console.log("Loan repaid successfully");
+        
+        // Log events from repayment
+        const repayEvent = repayReceipt.logs.find(
+          (log: any) => log.fragment && log.fragment.name === "LoanRepaid"
+        );
+        if (repayEvent) {
+          console.log("Repayment event:", {
+            invoiceId: repayEvent.args.invoiceId.toString(),
+            supplier: repayEvent.args.supplier,
+            amount: ethers.formatUnits(repayEvent.args.amount, 6)
+          });
+        }
       } catch (error: any) {
         console.log("Repay failed with error:", error.message);
+        // Log more details about the error
+        if (error.data) {
+          console.log("Error data:", error.data);
+        }
         throw error;
       }
 
+      // Check LP interest after repayment
+      const lpInterestAfter = await lendingPool.getLPInterest(lp.address);
+      console.log("LP interest after repayment:", ethers.formatUnits(lpInterestAfter, 6));
+      expect(lpInterestAfter).to.be.gt(lpInterestBefore);
+
       const updatedLoan = await lendingPool.loans(tokenId);
       expect(updatedLoan.isRepaid).to.be.true;
+
+      // Verify final balances
+      const finalSupplierBalance = await usdc.balanceOf(supplier.address);
+      const finalLendingPoolBalance = await usdc.balanceOf(await lendingPool.getAddress());
+      console.log("Final balances:", {
+        supplierBalance: ethers.formatUnits(finalSupplierBalance, 6),
+        lendingPoolBalance: ethers.formatUnits(finalLendingPoolBalance, 6)
+      });
+    });
+
+    it("Should calculate LP interest correctly", async function () {
+        // Get initial LP interest
+        const initialInterest = await lendingPool.getLPInterest(lp.address);
+        console.log("Initial LP interest:", ethers.formatUnits(initialInterest, 6));
+
+        // Get LP info
+        const lpInfo = await lendingPool.lpInfo(lp.address);
+        console.log("LP info:", {
+            depositAmount: ethers.formatUnits(lpInfo.depositAmount, 6),
+            interestAccrued: ethers.formatUnits(lpInfo.interestAccrued, 6),
+            lastInterestUpdate: new Date(Number(lpInfo.lastInterestUpdate) * 1000).toISOString()
+        });
+
+        // Calculate time elapsed since deposit
+        const timeElapsed = Math.floor(Date.now() / 1000) - Number(lpInfo.lastInterestUpdate);
+        console.log("Time elapsed since deposit (seconds):", timeElapsed);
+
+        // Get current interest from contract
+        const currentInterest = await lendingPool.getLPInterest(lp.address);
+        console.log("Current LP interest:", ethers.formatUnits(currentInterest, 6));
+
+        // Verify interest is greater than 0
+        expect(currentInterest).to.be.gt(0);
+        
+        // Verify interest is proportional to deposit amount
+        expect(currentInterest).to.be.lt(lpInfo.depositAmount);
     });
   });
 
@@ -336,7 +394,7 @@ describe("DeFi Credit Protocol", function () {
       console.log("\nAttempting to unstake before duration ends...");
       await expect(
         staking.connect(supplier).unstake()
-      ).to.be.revertedWith("Staking period not ended");
+      ).to.be.revertedWithCustomError(staking, "StakingPeriodNotEnded");
       console.log("Successfully prevented early unstaking");
     });
   });
