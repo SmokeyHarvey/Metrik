@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
+import { ethers, network } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-network-helpers";
 import * as fs from "fs";
 import * as path from "path";
@@ -22,7 +22,7 @@ describe("DeFi Credit Protocol", function () {
 
   // Test constants
   const STAKE_AMOUNT = ethers.parseEther("10000"); // 10,000 METRIK
-  const STAKE_DURATION = 180 * 24 * 60 * 60; // 180 days
+  const STAKE_DURATION = 180; // 3 minutes
   const LP_DEPOSIT = ethers.parseUnits("100000", 6); // 100,000 USDC
   const INVOICE_AMOUNT = ethers.parseUnits("50000", 6); // 50,000 USDC
   const BORROW_AMOUNT = ethers.parseUnits("30000", 6); // 30,000 USDC (60% of invoice)
@@ -387,15 +387,117 @@ describe("DeFi Credit Protocol", function () {
         // Verify interest is proportional to deposit amount
         expect(currentInterest).to.be.lt(lpInfo.depositAmount);
     });
+
+    it("Should allow LP to withdraw funds with accumulated interest", async function () {
+        // Get initial balances
+        const initialLPBalance = await usdc.balanceOf(lp.address);
+        const initialLendingPoolBalance = await usdc.balanceOf(await lendingPool.getAddress());
+        const lpInterest = await lendingPool.getLPInterest(lp.address);
+        
+        console.log("\nLP Withdrawal Test:");
+        console.log("Initial LP USDC balance:", ethers.formatUnits(initialLPBalance, 6));
+        console.log("Initial lending pool balance:", ethers.formatUnits(initialLendingPoolBalance, 6));
+        console.log("Accumulated LP interest:", ethers.formatUnits(lpInterest, 6));
+
+        // Get LP info
+        const lpInfo = await lendingPool.lpInfo(lp.address);
+        console.log("LP info:", {
+            depositAmount: ethers.formatUnits(lpInfo.depositAmount, 6),
+            interestAccrued: ethers.formatUnits(lpInfo.interestAccrued, 6),
+            lastInterestUpdate: new Date(Number(lpInfo.lastInterestUpdate) * 1000).toISOString()
+        });
+
+        // Withdraw LP funds
+        console.log("Withdrawing LP funds...");
+        const withdrawTx = await lendingPool.connect(lp).withdraw(lpInfo.depositAmount);
+        await withdrawTx.wait();
+
+        // Get final balances
+        const finalLPBalance = await usdc.balanceOf(lp.address);
+        const finalLendingPoolBalance = await usdc.balanceOf(await lendingPool.getAddress());
+        
+        console.log("Final LP USDC balance:", ethers.formatUnits(finalLPBalance, 6));
+        console.log("Final lending pool balance:", ethers.formatUnits(finalLendingPoolBalance, 6));
+
+        // Verify LP received their deposit plus interest
+        expect(finalLPBalance).to.be.gt(initialLPBalance);
+        expect(finalLendingPoolBalance).to.be.lt(initialLendingPoolBalance);
+    });
+
+    it("Should allow owner to withdraw platform fees", async function () {
+        // Get initial balances
+        const initialOwnerBalance = await usdc.balanceOf(owner.address);
+        const initialLendingPoolBalance = await usdc.balanceOf(await lendingPool.getAddress());
+        
+        console.log("\nPlatform Fee Withdrawal Test:");
+        console.log("Initial owner USDC balance:", ethers.formatUnits(initialOwnerBalance, 6));
+        console.log("Initial lending pool balance:", ethers.formatUnits(initialLendingPoolBalance, 6));
+
+        // Withdraw platform fees
+        console.log("Withdrawing platform fees...");
+        const withdrawTx = await lendingPool.connect(owner).withdrawPlatformFees();
+        await withdrawTx.wait();
+
+        // Get final balances
+        const finalOwnerBalance = await usdc.balanceOf(owner.address);
+        const finalLendingPoolBalance = await usdc.balanceOf(await lendingPool.getAddress());
+        
+        console.log("Final owner USDC balance:", ethers.formatUnits(finalOwnerBalance, 6));
+        console.log("Final lending pool balance:", ethers.formatUnits(finalLendingPoolBalance, 6));
+
+        // Verify owner received platform fees
+        expect(finalOwnerBalance).to.be.gt(initialOwnerBalance);
+        expect(finalLendingPoolBalance).to.be.lt(initialLendingPoolBalance);
+    });
+
+    it("Should not allow unstaking before duration ends", async function () {
+        console.log("\nAttempting to unstake before duration ends...");
+        await expect(
+            staking.connect(supplier).unstake()
+        ).to.be.revertedWithCustomError(staking, "StakingPeriodNotEnded");
+        console.log("Successfully prevented early unstaking");
+    });
+
+    it("Should allow supplier to unstake after loan repayment", async function () {
+        // Get initial balances
+        const initialSupplierMetrikBalance = await metrikToken.balanceOf(supplier.address);
+        const initialStakingBalance = await metrikToken.balanceOf(await staking.getAddress());
+        
+        console.log("\nUnstaking Test:");
+        console.log("Initial supplier METRIK balance:", ethers.formatEther(initialSupplierMetrikBalance));
+        console.log("Initial staking contract balance:", ethers.formatEther(initialStakingBalance));
+
+        // Get stake info
+        const stakeInfo = await staking.getStakeInfo(supplier.address);
+        console.log("Stake info:", {
+            amount: ethers.formatEther(stakeInfo.amount),
+            startTime: new Date(Number(stakeInfo.startTime) * 1000).toISOString(),
+            duration: stakeInfo.duration.toString()
+        });
+
+        // Wait for staking period to end (3 minutes)
+        console.log("Waiting for staking period to end (3 minutes)...");
+        await new Promise(resolve => setTimeout(resolve, 180000)); // Wait for 3 minutes
+
+        // Unstake
+        console.log("Unstaking METRIK tokens...");
+        const unstakeTx = await staking.connect(supplier).unstake();
+        await unstakeTx.wait();
+
+        // Get final balances
+        const finalSupplierMetrikBalance = await metrikToken.balanceOf(supplier.address);
+        const finalStakingBalance = await metrikToken.balanceOf(await staking.getAddress());
+        
+        console.log("Final supplier METRIK balance:", ethers.formatEther(finalSupplierMetrikBalance));
+        console.log("Final staking contract balance:", ethers.formatEther(finalStakingBalance));
+
+        // Verify supplier received their staked tokens
+        expect(finalSupplierMetrikBalance).to.be.gt(initialSupplierMetrikBalance);
+        expect(finalStakingBalance).to.be.lt(initialStakingBalance);
+    });
   });
 
   describe("Edge Cases and Error Conditions", function () {
-    it("Should not allow unstaking before duration ends", async function () {
-      console.log("\nAttempting to unstake before duration ends...");
-      await expect(
-        staking.connect(supplier).unstake()
-      ).to.be.revertedWithCustomError(staking, "StakingPeriodNotEnded");
-      console.log("Successfully prevented early unstaking");
-    });
+    // Remove the unstaking test from here since we moved it
   });
 }); 
