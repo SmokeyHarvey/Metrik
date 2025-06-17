@@ -45,6 +45,12 @@ async function main() {
   await lendingPool.waitForDeployment();
   console.log("LendingPool deployed to:", await lendingPool.getAddress());
 
+  // Transfer ownership of Staking to LendingPool
+  console.log("Transferring ownership of Staking to LendingPool...");
+  const transferOwnershipTx = await staking.transferOwnership(await lendingPool.getAddress());
+  await transferOwnershipTx.wait();
+  console.log("Ownership transferred successfully");
+
   // Helper function to grant role with retry
   async function grantRoleWithRetry(contract: any, role: string, account: string, maxRetries = 3) {
     let retries = 0;

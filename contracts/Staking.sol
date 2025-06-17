@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "./mocks/MockERC20.sol";
 
 /**
  * @title Staking
@@ -46,6 +47,7 @@ contract Staking is ReentrancyGuard, Ownable {
     event Unstaked(address indexed user, uint256 amount);
     event PointsUpdated(address indexed user, uint256 points);
     event TokensSlashed(address indexed user, uint256 amount);
+    event DebugLog(string message, address indexed user);
 
     constructor(address _metrikToken) Ownable(msg.sender) {
         metrikToken = IERC20(_metrikToken);
@@ -88,6 +90,9 @@ contract Staking is ReentrancyGuard, Ownable {
         totalStaked += amount;
         totalPoints += points;
         userPoints[msg.sender] += points;
+
+        // Debug log to ensure stake is recorded
+        emit DebugLog("Stake recorded", msg.sender);
 
         emit Staked(msg.sender, amount, duration);
         emit PointsUpdated(msg.sender, userPoints[msg.sender]);
@@ -174,8 +179,14 @@ contract Staking is ReentrancyGuard, Ownable {
         // Clear stake info
         delete stakes[user];
 
-        // Transfer slashed tokens to owner
-        metrikToken.safeTransfer(owner(), amount);
+        // Debug log before burning
+        emit DebugLog("Before burning", user);
+
+        // Burn the slashed tokens
+        MockERC20(address(metrikToken)).burn(amount);
+
+        // Debug log after burning
+        emit DebugLog("After burning", user);
 
         emit TokensSlashed(user, amount);
         emit PointsUpdated(user, userPoints[user]);

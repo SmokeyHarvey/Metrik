@@ -85,6 +85,7 @@ contract LendingPool is ReentrancyGuard, Ownable {
     event LoanCreated(uint256 indexed invoiceId, address indexed supplier, uint256 amount);
     event LoanRepaid(uint256 indexed invoiceId, address indexed supplier, uint256 amount);
     event LoanLiquidated(uint256 indexed invoiceId, address indexed supplier, uint256 amount);
+    event DebugLog(string message, address indexed supplier);
 
     constructor(
         address _metrikToken,
@@ -221,7 +222,7 @@ contract LendingPool is ReentrancyGuard, Ownable {
         require(loan.supplier == msg.sender, "Not loan owner");
 
         // Update interest accrued
-        uint256 interest = _calculateInterest(loan.amount, loan.lastInterestUpdate, BORROWER_INTEREST_RATE);
+        uint256 interest = calculateInterest(loan.amount, loan.lastInterestUpdate, BORROWER_INTEREST_RATE);
         loan.interestAccrued += interest;
         loan.lastInterestUpdate = block.timestamp;
 
@@ -257,14 +258,12 @@ contract LendingPool is ReentrancyGuard, Ownable {
         require(block.timestamp > loan.dueDate, "Loan not overdue");
 
         // Update interest accrued
-        uint256 interest = _calculateInterest(loan.amount, loan.lastInterestUpdate, BORROWER_INTEREST_RATE);
+        uint256 interest = calculateInterest(loan.amount, loan.lastInterestUpdate, BORROWER_INTEREST_RATE);
         loan.interestAccrued += interest;
         loan.lastInterestUpdate = block.timestamp;
 
-        uint256 totalAmount = loan.amount + loan.interestAccrued;
+        uint256 totalAmount = loan.amount + interest;
 
-        stablecoin.safeTransferFrom(msg.sender, address(this), totalAmount);
-        
         // Update platform fees
         uint256 platformFee = (loan.interestAccrued * PLATFORM_FEE) / BORROWER_INTEREST_RATE;
         platformFees += platformFee;
@@ -278,8 +277,14 @@ contract LendingPool is ReentrancyGuard, Ownable {
         // Blacklist supplier
         blacklistedSuppliers[supplierId] = true;
 
+        // Debug log before slashing
+        emit DebugLog("Before slashing", loan.supplier);
+
         // Slash staked tokens
         staking.slashStakedTokens(loan.supplier);
+
+        // Debug log after slashing
+        emit DebugLog("After slashing", loan.supplier);
 
         // Burn the invoice NFT
         invoiceNFT.burn(invoiceId);
@@ -297,7 +302,7 @@ contract LendingPool is ReentrancyGuard, Ownable {
         LPInfo storage info = lpInfo[lp];
         if (info.depositAmount > 0) {
             // Calculate new interest since last update
-            uint256 newInterest = _calculateInterest(
+            uint256 newInterest = calculateInterest(
                 info.depositAmount,
                 info.lastInterestUpdate,
                 LP_INTEREST_RATE
@@ -315,11 +320,11 @@ contract LendingPool is ReentrancyGuard, Ownable {
      * @param rate Interest rate
      * @return Interest amount
      */
-    function _calculateInterest(
+    function calculateInterest(
         uint256 principal,
         uint256 startTime,
         uint256 rate
-    ) internal view returns (uint256) {
+    ) public view returns (uint256) {
         uint256 timeElapsed = block.timestamp - startTime;
         // Convert timeElapsed to years (with 18 decimals for precision)
         uint256 timeInYears = (timeElapsed * 1e18) / (365 days);
@@ -337,7 +342,7 @@ contract LendingPool is ReentrancyGuard, Ownable {
         if (info.depositAmount == 0) return info.interestAccrued;
         
         // Calculate current interest including accrued and new interest
-        uint256 currentInterest = info.interestAccrued + _calculateInterest(
+        uint256 currentInterest = info.interestAccrued + calculateInterest(
             info.depositAmount,
             info.lastInterestUpdate,
             LP_INTEREST_RATE
@@ -398,7 +403,7 @@ contract LendingPool is ReentrancyGuard, Ownable {
         // Calculate current interest
         uint256 currentInterest = loan.interestAccrued;
         if (!loan.isRepaid && !loan.isLiquidated) {
-            currentInterest += _calculateInterest(
+            currentInterest += calculateInterest(
                 loan.amount,
                 loan.lastInterestUpdate,
                 BORROWER_INTEREST_RATE
