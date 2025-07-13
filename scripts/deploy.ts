@@ -1,6 +1,7 @@
 import { ethers } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
+import { LendingPool } from "../typechain-types";
 
 async function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -29,21 +30,34 @@ async function main() {
   console.log("InvoiceNFT deployed to:", await invoiceNFT.getAddress());
 
   // Deploy Staking
-  const Staking = await ethers.getContractFactory("Staking");
-  const staking = await Staking.deploy(await metrikToken.getAddress());
+  const staking = await ethers.deployContract("Staking", [await metrikToken.getAddress()]);
   await staking.waitForDeployment();
   console.log("Staking deployed to:", await staking.getAddress());
 
   // Deploy LendingPool
-  const LendingPool = await ethers.getContractFactory("LendingPool");
-  const lendingPool = await LendingPool.deploy(
+  const lendingPool = await ethers.deployContract("LendingPool", [
     await metrikToken.getAddress(),
     await usdc.getAddress(),
     await invoiceNFT.getAddress(),
     await staking.getAddress()
-  );
+  ]);
   await lendingPool.waitForDeployment();
   console.log("LendingPool deployed to:", await lendingPool.getAddress());
+
+  // Deploy BorrowRegistry
+  const borrowRegistry = await ethers.deployContract("BorrowRegistry");
+  await borrowRegistry.waitForDeployment();
+  console.log("BorrowRegistry deployed to:", await borrowRegistry.getAddress());
+
+  // Set the LendingPool address in BorrowRegistry
+  const setLPTx = await borrowRegistry.setLendingPool(await lendingPool.getAddress());
+  await setLPTx.wait();
+  console.log("Set LendingPool in BorrowRegistry");
+  
+  // Set the BorrowRegistry address in LendingPool
+  const setBRTx = await lendingPool.setBorrowRegistry(await borrowRegistry.getAddress());
+  await setBRTx.wait();
+  console.log("Set BorrowRegistry in LendingPool");
 
   // Transfer ownership of Staking to LendingPool
   console.log("Transferring ownership of Staking to LendingPool...");
@@ -89,7 +103,8 @@ async function main() {
     usdc: await usdc.getAddress(),
     invoiceNFT: await invoiceNFT.getAddress(),
     staking: await staking.getAddress(),
-    lendingPool: await lendingPool.getAddress()
+    lendingPool: await lendingPool.getAddress(),
+    borrowRegistry: await borrowRegistry.getAddress()
   };
 
   fs.writeFileSync(deploymentPath, JSON.stringify(deployment, null, 2));

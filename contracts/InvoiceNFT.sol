@@ -72,8 +72,8 @@ contract InvoiceNFT is ERC721, ERC721Enumerable, ERC721URIStorage, AccessControl
 
         _invoiceDetails[tokenId] = InvoiceDetails({
             invoiceId: invoiceId,
-            supplier: msg.sender,
-            buyer: to,
+            supplier: to, // The supplier is the one who receives the NFT
+            buyer: msg.sender, // The buyer is the one who mints
             creditAmount: creditAmount,
             dueDate: dueDate,
             ipfsHash: ipfsHash,
@@ -82,7 +82,7 @@ contract InvoiceNFT is ERC721, ERC721Enumerable, ERC721URIStorage, AccessControl
 
         _usedInvoiceIds[invoiceId] = true;
 
-        emit InvoiceMinted(tokenId, msg.sender, invoiceId);
+        emit InvoiceMinted(tokenId, to, invoiceId);
         return tokenId;
     }
 
