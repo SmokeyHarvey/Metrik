@@ -37,6 +37,17 @@ const config: HardhatUserConfig = {
         process.env.PRIVATE_KEY_BUYER || ""
       ].filter(key => key !== "")
     },
+    Citrea: {
+      url: "https://citrea-testnet.public.blastapi.io",
+      chainId: 5115,
+      timeout: 60000,
+      accounts: [
+        process.env.PRIVATE_KEY_OWNER || "",
+        process.env.PRIVATE_KEY_SUPPLIER || "",
+        process.env.PRIVATE_KEY_LP || "",
+        process.env.PRIVATE_KEY_BUYER || ""
+      ].filter(key => key !== "")
+    },
   },
   etherscan: {
     apiKey: {
